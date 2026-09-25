@@ -1,0 +1,222 @@
+---
+# forensics_alerts.yaml
+# Domain-specific alerting rules for the ForensicChain system.
+# These map directly to D8 evaluation criteria.
+
+groups:
+
+  # ── Evidence integrity ──────────────────────────────────────────────────────
+  - name: evidence_integrity
+    rules:
+
+      - alert: EvidenceTamperDetected
+        expr: |
+          increase(http_requests_total{
+            path=~"/api/v1/cases/.*/evidence/.*",
+            status="423"
+          }[5m]) > 0
+        for: 0m      # Immediate — tamper is a critical security event
+        labels:
+          severity: critical
+          team: forensics
+        annotations:
+          summary: "Evidence tamper detected"
+          description: |
+            A SHA-256 mismatch was detected on evidence access.
+            At least {{ $value }} tamper event(s) in the last 5 minutes.
+            Check the audit log: action_type = 'evidence.tamper_detected'.
+          runbook: "https://docs.forensics.internal/runbooks/tamper-response"
+
+      - alert: EvidenceIntegrityCheckRate
+        expr: |
+          rate(http_requests_total{
+            path=~"/api/v1/cases/.*/evidence/.*"
+          }[5m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+          team: forensics
+        annotations:
+          summary: "No evidence integrity checks in 30 minutes"
+          description: |
+            The evidence access endpoint has received no traffic for 30 minutes.
+            This may indicate the API is unreachable or no examiners are active.
+
+  # ── Chain of custody ────────────────────────────────────────────────────────
+  - name: custody_chain
+    rules:
+
+      - alert: CustodyTransferPendingTooLong
+        expr: |
+          time() - forensics_custody_transfer_initiated_timestamp > 86400
+        for: 1h
+        labels:
+          severity: warning
+          team: forensics
+        annotations:
+          summary: "Custody transfer pending for over 24 hours"
+          description: |
+            A custody transfer has been in PENDING state for more than 24 hours.
+            Evidence: {{ $labels.evidence_id }}.
+            This creates a gap in the chain of custody record.
+
+      - alert: KafkaCustodyEventLag
+        expr: |
+          kafka_consumergroup_lag{topic="forensics.custody"} > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: forensics
+        annotations:
+          summary: "Kafka custody event consumer lag is high"
+          description: |
+            Consumer lag on forensics.custody topic is {{ $value }} messages.
+            Audit mirror may be falling behind.
+
+  # ── API performance (D8 acceptance criteria) ─────────────────────────────────
+  - name: api_performance
+    rules:
+
+      - alert: APILatencyP95High
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path)
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "API p95 latency exceeds 200ms target"
+          description: |
+            Path {{ $labels.path }} p95 latency is {{ $value | humanizeDuration }}.
+            D8 acceptance criterion: p95 < 200ms.
+
+      - alert: APIErrorRateHigh
+        expr: |
+          rate(http_requests_total{status=~"5.."}[5m])
+          /
+          rate(http_requests_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "API error rate above 1%"
+          description: "{{ $value | humanizePercentage }} of requests are returning 5xx."
+
+      - alert: VerificationPortalDown
+        expr: |
+          up{job="forensics_api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "ForensicChain API is unreachable"
+          description: "The public verification portal is down. Lawyers cannot verify evidence."
+
+  # ── Authorization enforcement ────────────────────────────────────────────────
+  - name: authorization
+    rules:
+
+      - alert: UnauthorizedAccessAttempts
+        expr: |
+          increase(http_requests_total{status="403"}[10m]) > 10
+        for: 0m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High rate of 403 Forbidden responses"
+          description: |
+            {{ $value }} unauthorized access attempts in the last 10 minutes.
+            Could indicate credential stuffing or role escalation attempt.
+            Check audit log: result = 'blocked'.
+
+      - alert: VerifyPortalRateLimitHit
+        expr: |
+          increase(http_requests_total{
+            path="/api/v1/verify",
+            status="429"
+          }[1m]) > 5
+        for: 0m
+        labels:
+          severity: info
+          team: security
+        annotations:
+          summary: "Verification portal rate limit triggered"
+          description: |
+            {{ $value }} rate-limited requests to /verify in the last minute.
+            Could indicate automated hash enumeration (MC-07).
+
+---
+# infrastructure_alerts.yaml
+groups:
+
+  - name: infrastructure
+    rules:
+
+      - alert: PostgreSQLDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is unreachable"
+          description: "The forensics database is down. All case and evidence operations will fail."
+
+      - alert: PostgreSQLHighConnections
+        expr: pg_stat_activity_count > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connection count is high ({{ $value }})"
+
+      - alert: KafkaDown
+        expr: kafka_brokers < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka broker is unreachable"
+          description: |
+            Custody transfer events and audit mirror writes are failing.
+            The API continues to function (DB write is source of truth)
+            but the S3 audit mirror is not receiving events.
+
+      - alert: MinIOStorageLow
+        expr: |
+          minio_cluster_capacity_usable_free_bytes
+          /
+          minio_cluster_capacity_usable_total_bytes < 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MinIO evidence storage below 10% free"
+          description: "Evidence file uploads may start failing. Provision additional storage."
+
+      - alert: PodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total{
+            namespace="forensics"
+          }[5m]) * 60 * 5 > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.pod }} is crash-looping"
+          description: "Container {{ $labels.container }} has restarted {{ $value }} times in 5 minutes."
+
+      - alert: PersistentVolumeAlmostFull
+        expr: |
+          kubelet_volume_stats_available_bytes{namespace="forensics"}
+          /
+          kubelet_volume_stats_capacity_bytes{namespace="forensics"} < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PV {{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full"

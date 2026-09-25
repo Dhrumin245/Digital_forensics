@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: forensics
+
+bases:
+  - ../../base
+
+# Dev overlay: lower resources, 1 replica, debug logging
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: forensics-api
+        namespace: forensics
+      spec:
+        replicas: 1
+        template:
+          spec:
+            containers:
+              - name: api
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "256Mi"
+                command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: forensics-api-hpa
+        namespace: forensics
+      spec:
+        minReplicas: 1
+        maxReplicas: 2
+
+configMapGenerator:
+  - name: forensics-config
+    namespace: forensics
+    behavior: merge
+    literals:
+      - ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:8000"]
+      - VERIFY_RATE_LIMIT_PER_MINUTE=100   # Relaxed for testing

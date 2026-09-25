@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: forensics
+
+bases:
+  - ../../base
+
+# Prod overlay: full replicas, strict limits, production image tag
+images:
+  - name: ghcr.io/YOUR_ORG/forensics-api
+    newTag: "1.0.0"   # Pin to a specific release tag — never use 'latest' in prod
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: forensics-api
+        namespace: forensics
+      spec:
+        replicas: 3
+        template:
+          spec:
+            containers:
+              - name: api
+                resources:
+                  requests:
+                    cpu: "500m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "2000m"
+                    memory: "1Gi"
+
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: forensics-api-hpa
+        namespace: forensics
+      spec:
+        minReplicas: 3
+        maxReplicas: 12
+
+configMapGenerator:
+  - name: forensics-config
+    namespace: forensics
+    behavior: merge
+    literals:
+      - ALLOWED_ORIGINS=["https://forensics.yourdomain.com"]
+      - VERIFY_RATE_LIMIT_PER_MINUTE=10
+      - VERIFY_RATE_LIMIT_PER_HOUR=100

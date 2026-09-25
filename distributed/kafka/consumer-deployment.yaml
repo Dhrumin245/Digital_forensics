@@ -1,0 +1,42 @@
+# ── Audit Mirror Consumer Deployment ──────────────────────────────────────────
+# Runs the audit_mirror_consumer.py alongside the API.
+# Single replica — Kafka partition-based ordering guarantees correct sequencing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-mirror-consumer
+  namespace: forensics
+  labels:
+    app: audit-mirror-consumer
+    app.kubernetes.io/component: kafka-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-mirror-consumer
+  template:
+    metadata:
+      labels:
+        app: audit-mirror-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: ghcr.io/YOUR_ORG/forensics-api:latest
+          command: ["python", "kafka/audit_mirror_consumer.py"]
+          envFrom:
+            - configMapRef:
+                name: forensics-config
+            - secretRef:
+                name: forensics-secrets
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            periodSeconds: 30
+      restartPolicy: Always

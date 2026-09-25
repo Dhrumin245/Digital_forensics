@@ -1,0 +1,286 @@
+{
+  "title": "ForensicChain — Operational Dashboard",
+  "uid": "forensicchain-ops",
+  "description": "API performance, evidence integrity, custody completeness, and infrastructure health",
+  "tags": ["forensicchain", "forensics", "phase5"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "schemaVersion": 38,
+
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "constant",
+        "current": { "value": "forensics" }
+      },
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus" },
+        "query": "label_values(up{namespace=\"forensics\"}, pod)",
+        "refresh": 2
+      }
+    ]
+  },
+
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "API request rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 7 },
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{namespace=\"forensics\"}[1m])) by (path)",
+        "legendFormat": "{{ path }}"
+      }],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" } }
+      }
+    },
+
+    {
+      "id": 2,
+      "title": "API latency p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{namespace=\"forensics\"}[1m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{namespace=\"forensics\"}[1m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{namespace=\"forensics\"}[1m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 0.2 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 3,
+      "title": "Error rate (%)",
+      "type": "gauge",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 7 },
+      "targets": [{
+        "expr": "100 * rate(http_requests_total{namespace=\"forensics\",status=~\"5..\"}[5m]) / rate(http_requests_total{namespace=\"forensics\"}[5m])"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 4,
+      "title": "Active pods",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 7 },
+      "targets": [{
+        "expr": "count(up{namespace=\"forensics\", job=\"forensics_api\"} == 1)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 2 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 5,
+      "title": "Tamper detections (critical)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 7, "w": 4, "h": 5 },
+      "targets": [{
+        "expr": "increase(http_requests_total{namespace=\"forensics\",status=\"423\"}[24h])"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto" }
+    },
+
+    {
+      "id": 6,
+      "title": "Unauthorized access attempts (403s)",
+      "type": "timeseries",
+      "gridPos": { "x": 4, "y": 7, "w": 8, "h": 5 },
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{namespace=\"forensics\",status=\"403\"}[5m]))",
+        "legendFormat": "403 Forbidden/s"
+      }],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "color": { "fixedColor": "orange", "mode": "fixed" } }
+      }
+    },
+
+    {
+      "id": 7,
+      "title": "Verification portal queries (/verify)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 7, "w": 8, "h": 5 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{namespace=\"forensics\",path=~\"/api/v1/verify.*\",status=\"200\"}[5m]))",
+          "legendFormat": "verified"
+        },
+        {
+          "expr": "sum(rate(http_requests_total{namespace=\"forensics\",path=~\"/api/v1/verify.*\",status=\"429\"}[5m]))",
+          "legendFormat": "rate-limited"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+
+    {
+      "id": 8,
+      "title": "Kafka consumer lag — forensics.custody",
+      "type": "timeseries",
+      "gridPos": { "x": 20, "y": 7, "w": 4, "h": 5 },
+      "targets": [{
+        "expr": "kafka_consumergroup_lag{topic=\"forensics.custody\"}",
+        "legendFormat": "lag"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 9,
+      "title": "PostgreSQL — active connections",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 6 },
+      "targets": [{
+        "expr": "pg_stat_activity_count",
+        "legendFormat": "connections"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 10,
+      "title": "PostgreSQL — transaction rate",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 12, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_xact_commit[1m])",
+          "legendFormat": "commits/s"
+        },
+        {
+          "expr": "rate(pg_stat_database_xact_rollback[1m])",
+          "legendFormat": "rollbacks/s"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+
+    {
+      "id": 11,
+      "title": "Memory usage — API pods",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 12, "w": 8, "h": 6 },
+      "targets": [{
+        "expr": "container_memory_working_set_bytes{namespace=\"forensics\",container=\"api\"}",
+        "legendFormat": "{{ pod }}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+
+    {
+      "id": 12,
+      "title": "CPU usage — API pods",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 6 },
+      "targets": [{
+        "expr": "rate(container_cpu_usage_seconds_total{namespace=\"forensics\",container=\"api\"}[1m])",
+        "legendFormat": "{{ pod }}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+
+    {
+      "id": 13,
+      "title": "Evidence uploads per minute",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 6 },
+      "targets": [{
+        "expr": "rate(http_requests_total{namespace=\"forensics\",path=~\"/api/v1/cases/.*/evidence\",method=\"POST\",status=\"201\"}[1m]) * 60",
+        "legendFormat": "uploads/min"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    }
+  ]
+}

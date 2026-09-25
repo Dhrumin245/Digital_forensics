@@ -1,0 +1,221 @@
+# ── FastAPI API Deployment ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forensics-api
+  namespace: forensics
+  labels:
+    app: forensics-api
+    app.kubernetes.io/part-of: forensicchain
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: forensics-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0       # Zero-downtime deployments
+  template:
+    metadata:
+      labels:
+        app: forensics-api
+      annotations:
+        # Prometheus auto-discovery
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      # Never run as root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      # Wait for DB to be reachable before starting
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres-service 5432; do
+                echo "Waiting for PostgreSQL..."; sleep 2;
+              done
+              echo "PostgreSQL is ready."
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z kafka-service 9092; do
+                echo "Waiting for Kafka..."; sleep 2;
+              done
+              echo "Kafka is ready."
+        - name: run-migrations
+          image: ghcr.io/YOUR_ORG/forensics-api:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: forensics-config
+            - secretRef:
+                name: forensics-secrets
+
+      containers:
+        - name: api
+          image: ghcr.io/YOUR_ORG/forensics-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: forensics-config
+            - secretRef:
+                name: forensics-secrets
+
+          # Resource limits — tuned for a forensics workload
+          # Evidence uploads are CPU-heavy (SHA-256), memory is modest
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+
+          # Startup probe — give migrations time to complete
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 5
+
+          # Liveness — restart if the app hangs
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+          # Readiness — remove from load balancer if not ready
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Graceful shutdown — finish in-flight requests
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Spread replicas across nodes
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: forensics-api
+
+---
+# ── Service ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: forensics-api-service
+  namespace: forensics
+  labels:
+    app: forensics-api
+spec:
+  selector:
+    app: forensics-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+# ── HorizontalPodAutoscaler ────────────────────────────────────────────────────
+# Scale up when CPU > 60% or memory > 70%.
+# Evidence upload spikes (SHA-256 computation) will trigger CPU scaling.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: forensics-api-hpa
+  namespace: forensics
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: forensics-api
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # Cool down 5 min before scaling down
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+
+---
+# ── PodDisruptionBudget ────────────────────────────────────────────────────────
+# Always keep at least 1 replica during voluntary disruptions (node drain, upgrades)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: forensics-api-pdb
+  namespace: forensics
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: forensics-api

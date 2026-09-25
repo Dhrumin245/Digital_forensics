@@ -1,0 +1,114 @@
+# ── Argo CD Application — Dev ──────────────────────────────────────────────────
+# Argo CD watches this Git repo and auto-syncs any manifest changes.
+# Install Argo CD: kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: forensicchain-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/YOUR_ORG/forensicchain
+    targetRevision: develop             # Track the develop branch
+    path: k8s/overlays/dev             # Kustomize overlay to apply
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: forensics
+
+  syncPolicy:
+    automated:
+      prune: true        # Remove resources deleted from Git
+      selfHeal: true     # Revert manual kubectl changes
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Health checks Argo CD will monitor
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas     # HPA manages replicas — ignore drift
+
+---
+# ── Argo CD Application — Production ──────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: forensicchain-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/YOUR_ORG/forensicchain
+    targetRevision: main               # Track main branch (release tags)
+    path: k8s/overlays/prod
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: forensics
+
+  syncPolicy:
+    # Manual sync for production — no auto-deploy without approval
+    automated: null
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+---
+# ── Argo CD AppProject — restrict what Argo CD can do ─────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: forensicchain
+  namespace: argocd
+spec:
+  description: ForensicChain forensic case management system
+
+  # Only sync from our own repo
+  sourceRepos:
+    - https://github.com/YOUR_ORG/forensicchain
+
+  # Only deploy to the forensics namespace
+  destinations:
+    - namespace: forensics
+      server: https://kubernetes.default.svc
+
+  # Restrict which Kubernetes resources can be managed
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  # Prevent accidental deletion of stateful resources without approval
+  orphanedResources:
+    warn: true

@@ -1,0 +1,87 @@
+# ── Prometheus configuration ───────────────────────────────────────────────────
+# Scrapes: FastAPI app, PostgreSQL exporter, Kafka exporter, Redis exporter
+# Alerting rules: tamper detection, custody gaps, API latency, pod health
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: forensicchain
+    environment: production
+
+# ── Alertmanager ───────────────────────────────────────────────────────────────
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager-service:9093"]
+
+# ── Rule files ─────────────────────────────────────────────────────────────────
+rule_files:
+  - "/etc/prometheus/rules/forensics_alerts.yaml"
+  - "/etc/prometheus/rules/infrastructure_alerts.yaml"
+
+# ── Scrape configs ─────────────────────────────────────────────────────────────
+scrape_configs:
+
+  # ── FastAPI application ────────────────────────────────────────────────────
+  - job_name: forensics_api
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [forensics]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        target_label: __address__
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+
+  # ── PostgreSQL exporter ────────────────────────────────────────────────────
+  # Deploy prom/postgres-exporter as a sidecar or separate pod
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter-service:9187"]
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: component
+        replacement: database
+
+  # ── Kafka exporter ────────────────────────────────────────────────────────
+  # Deploy bitnami/kafka-exporter
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter-service:9308"]
+    relabel_configs:
+      - target_label: component
+        replacement: message-broker
+
+  # ── Redis exporter ────────────────────────────────────────────────────────
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter-service:9121"]
+    relabel_configs:
+      - target_label: component
+        replacement: cache
+
+  # ── Kubernetes node metrics ────────────────────────────────────────────────
+  - job_name: kubernetes-nodes
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)

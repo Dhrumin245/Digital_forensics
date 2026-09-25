@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: ForensicChain Dashboards
+    orgId: 1
+    folder: ForensicChain
+    folderUid: forensicchain
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

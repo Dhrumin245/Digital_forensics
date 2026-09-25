@@ -1,0 +1,221 @@
+# ══════════════════════════════════════════════════════════════════
+# INGRESS — NGINX with TLS termination
+# ══════════════════════════════════════════════════════════════════
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forensics-ingress
+  namespace: forensics
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2048m"   # Allow 2GB evidence uploads
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"   # Long timeout for large uploads
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/rate-limit: "100"           # Global rate limit
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"     # Auto TLS via cert-manager
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - forensics.yourdomain.com
+      secretName: forensics-tls
+  rules:
+    - host: forensics.yourdomain.com
+      http:
+        paths:
+          # Public verification portal — rate limited separately at app layer
+          - path: /api/v1/verify
+            pathType: Prefix
+            backend:
+              service:
+                name: forensics-api-service
+                port:
+                  number: 80
+          # All other API routes
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: forensics-api-service
+                port:
+                  number: 80
+          # Health check (no auth)
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: forensics-api-service
+                port:
+                  number: 80
+
+---
+# ══════════════════════════════════════════════════════════════════
+# NETWORK POLICIES — Zero-trust between pods
+# ══════════════════════════════════════════════════════════════════
+
+# API can only talk to: postgres, kafka, redis, minio
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-egress
+  namespace: forensics
+spec:
+  podSelector:
+    matchLabels:
+      app: forensics-api
+  policyTypes:
+    - Egress
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: kafka
+      ports:
+        - port: 9092
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - port: 6379
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - port: 9000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: jaeger
+      ports:
+        - port: 4317   # OTLP gRPC
+    # DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+
+---
+# Postgres: only accepts from API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: forensics
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: forensics-api
+      ports:
+        - port: 5432
+
+---
+# Kafka: only API and topic-init job
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-ingress
+  namespace: forensics
+spec:
+  podSelector:
+    matchLabels:
+      app: kafka
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: forensics-api
+      ports:
+        - port: 9092
+
+---
+# ══════════════════════════════════════════════════════════════════
+# JAEGER — Distributed tracing (all-in-one for dev/staging)
+# ══════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: forensics
+  labels:
+    app: jaeger
+    app.kubernetes.io/component: tracing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.61
+          ports:
+            - containerPort: 16686   # UI
+              name: ui
+            - containerPort: 4317    # OTLP gRPC
+              name: otlp-grpc
+            - containerPort: 4318    # OTLP HTTP
+              name: otlp-http
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: "memory"        # Use Elasticsearch in production
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-service
+  namespace: forensics
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+  type: ClusterIP

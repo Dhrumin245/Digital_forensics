@@ -1,0 +1,2228 @@
+openapi: "3.1.0"
+
+info:
+  title: Cryptographically Verifiable Digital Forensics API
+  version: "1.0.0"
+  description: |
+    REST API for the Cryptographically Verifiable Digital Forensics Case and Evidence
+    Management system. Covers case intake, evidence registry, acquisition hash import,
+    custody transfer, examiner tasking, findings, report versioning, and the public
+    verification portal.
+
+    ## Authentication
+    All endpoints (except /auth/login and /verify/*) require a Bearer JWT token in the
+    Authorization header. Tokens carry a `role` claim used for RBAC enforcement.
+
+    ## Roles
+    - **CaseManager** — opens/closes cases, assigns users, submits reports for review
+    - **LabTechnician** — registers evidence, imports hashes, initiates custody transfers
+    - **Examiner** — accepts custody, records findings, writes reports
+    - **LegalReviewer** — reviews and locks court-ready reports
+    - **Admin** — manages users, views audit logs
+    - **PublicVerifier** — unauthenticated access to the verification portal only
+
+    ## Cryptographic guarantees
+    - Evidence SHA-256 is computed **server-side** on raw bytes — client-supplied hashes
+      are rejected for new uploads.
+    - Report versions are immutable — each save creates a new version row with its own
+      SHA-256. Deletion is not permitted.
+    - Custody records are append-only. Once confirmed, they cannot be modified.
+    - All write operations produce an entry in the immutable audit log.
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local development
+  - url: https://forensics.example.com/api/v1
+    description: Production
+
+tags:
+  - name: Auth
+    description: Login and token refresh
+  - name: Cases
+    description: Case lifecycle management (US-01, US-02, US-03)
+  - name: Evidence
+    description: Evidence registry and acquisition hash import (US-04, US-05, US-06)
+  - name: Custody
+    description: Chain of custody transfers (US-07, US-08)
+  - name: Tasks
+    description: Examiner task assignment and tracking (US-09)
+  - name: Findings
+    description: Examiner findings linked to evidence and tasks (US-10)
+  - name: Reports
+    description: Report creation, versioning, and locking (US-11, US-12, US-14)
+  - name: Verify
+    description: Public verification portal — no auth required (US-13)
+  - name: Users
+    description: User management (US-16)
+  - name: Audit
+    description: Immutable audit log access (US-15)
+
+# ─────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────
+paths:
+
+  # ── AUTH ────────────────────────────────────
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login and receive a JWT token
+      operationId: auth_login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token using refresh token
+      operationId: auth_refresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "200":
+          description: New access token issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current authenticated user profile
+      operationId: auth_me
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Current user details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── CASES ───────────────────────────────────
+
+  /cases:
+    get:
+      tags: [Cases]
+      summary: List cases accessible to the current user
+      operationId: list_cases
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/CaseStatus"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated list of cases
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [Cases]
+      summary: "US-01 — Create a new case"
+      description: |
+        Creates a new forensic case with a system-generated unique ID.
+        - Status defaults to `open`
+        - Creation timestamp and creator ID are recorded automatically
+        - A `case.created` event is written to the audit log
+      operationId: create_case
+      security:
+        - BearerAuth: []
+      x-required-roles: [CaseManager]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCaseRequest"
+      responses:
+        "201":
+          description: Case created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Case"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /cases/{case_id}:
+    get:
+      tags: [Cases]
+      summary: Get a single case by ID
+      operationId: get_case
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      responses:
+        "200":
+          description: Case details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Case"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [Cases]
+      summary: "US-03 — Update case metadata or transition status"
+      description: |
+        Valid status transitions: open → active → closed → archived.
+        Closing a case requires at least one verified evidence item.
+        All transitions are logged with reason and timestamp.
+      operationId: update_case
+      security:
+        - BearerAuth: []
+      x-required-roles: [CaseManager]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCaseRequest"
+      responses:
+        "200":
+          description: Updated case
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Case"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Invalid status transition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cases/{case_id}/assignments:
+    get:
+      tags: [Cases]
+      summary: List all users assigned to a case
+      operationId: list_case_assignments
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      responses:
+        "200":
+          description: List of assigned users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CaseAssignment"
+
+    post:
+      tags: [Cases]
+      summary: "US-02 — Assign a user to a case"
+      description: |
+        Only users with Examiner or LabTechnician role may be assigned.
+        Assignment is logged with the assigning manager's ID and timestamp.
+        Assigned users gain immediate case-scoped access.
+      operationId: assign_user_to_case
+      security:
+        - BearerAuth: []
+      x-required-roles: [CaseManager]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignUserRequest"
+      responses:
+        "201":
+          description: Assignment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseAssignment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: User already assigned or invalid role for assignment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cases/{case_id}/assignments/{user_id}:
+    delete:
+      tags: [Cases]
+      summary: Remove a user from a case
+      description: |
+        Blocked if the user is the current custodian of any evidence in this case.
+        Case manager receives an alert if evidence has no custodian after removal.
+      operationId: remove_case_assignment
+      security:
+        - BearerAuth: []
+      x-required-roles: [CaseManager]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Assignment removed
+        "409":
+          description: Cannot remove — user is active custodian of evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── EVIDENCE ────────────────────────────────
+
+  /cases/{case_id}/evidence:
+    get:
+      tags: [Evidence]
+      summary: List all evidence items for a case
+      operationId: list_evidence
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - name: integrity_status
+          in: query
+          schema:
+            $ref: "#/components/schemas/IntegrityStatus"
+      responses:
+        "200":
+          description: List of evidence items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Evidence"
+
+    post:
+      tags: [Evidence]
+      summary: "US-04 — Upload a new evidence file"
+      description: |
+        Uploads a digital evidence file. SHA-256 is computed **server-side** on raw bytes.
+        Client-supplied hashes are ignored. Evidence record stores: filename, size, MIME
+        type, upload timestamp, uploader ID, and computed hash. Upload event is written
+        to the audit log immediately.
+      operationId: upload_evidence
+      security:
+        - BearerAuth: []
+      x-required-roles: [LabTechnician]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, description]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The raw evidence file — hash computed server-side
+                description:
+                  type: string
+                  maxLength: 1000
+                  description: Brief description of what this evidence is
+                acquisition_notes:
+                  type: string
+                  maxLength: 2000
+                  description: Scene notes, acquisition tool used, storage medium info
+                evidence_type:
+                  $ref: "#/components/schemas/EvidenceType"
+      responses:
+        "201":
+          description: Evidence registered with computed hash
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Evidence"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: File too large (max 2GB)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cases/{case_id}/evidence/import:
+    post:
+      tags: [Evidence]
+      summary: "US-05 — Import acquisition hashes from external forensic tools"
+      description: |
+        Accepts a CSV or JSON file exported from Autopsy, FTK, or similar tools.
+        CSV columns required: filename, sha256, acquisition_tool, acquisition_date.
+        Duplicate hashes raise a conflict warning — requires manual confirmation.
+        Invalid rows are rejected with row-level errors; valid rows still import.
+      operationId: import_hashes
+      security:
+        - BearerAuth: []
+      x-required-roles: [LabTechnician]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - name: force_duplicates
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Set true to confirm import of duplicate hashes after initial warning
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CSV or JSON hash export from a forensic tool
+                acquisition_tool:
+                  type: string
+                  description: Name of the tool (e.g. "Autopsy 4.20", "FTK 7.1")
+      responses:
+        "200":
+          description: Import result with row-level status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HashImportResult"
+        "409":
+          description: Duplicate hashes found — set force_duplicates=true to proceed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HashImportResult"
+
+  /cases/{case_id}/evidence/{evidence_id}:
+    get:
+      tags: [Evidence]
+      summary: "US-06 — Get evidence details and verify integrity"
+      description: |
+        Returns evidence metadata. **Re-computes SHA-256 on every call** and compares
+        to the stored hash. If hashes differ, integrity_status is set to `tampered`,
+        a critical tamper alert is raised, and access is restricted pending review.
+      operationId: get_evidence
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/EvidenceId"
+      responses:
+        "200":
+          description: Evidence details with live integrity check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceWithIntegrity"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /cases/{case_id}/evidence/{evidence_id}/download:
+    get:
+      tags: [Evidence]
+      summary: Download an evidence file (triggers integrity check)
+      description: |
+        Downloads the raw evidence file. Hash is re-verified before the response is
+        sent. If tampered, returns 423 Locked instead of the file.
+      operationId: download_evidence
+      security:
+        - BearerAuth: []
+      x-required-roles: [LabTechnician, Examiner, CaseManager]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/EvidenceId"
+      responses:
+        "200":
+          description: Raw evidence file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            X-Evidence-Hash:
+              description: SHA-256 of the file being returned
+              schema:
+                type: string
+            X-Integrity-Status:
+              description: verified or tampered
+              schema:
+                type: string
+        "423":
+          description: Evidence is locked due to tamper detection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── CUSTODY ─────────────────────────────────
+
+  /cases/{case_id}/evidence/{evidence_id}/custody:
+    get:
+      tags: [Custody]
+      summary: "US-08 — Get full chain of custody for an evidence item"
+      description: |
+        Returns the complete custody timeline in chronological order. Each entry shows
+        who transferred, who received, when, and verification status. Gaps in the chain
+        are flagged in the response.
+      operationId: get_custody_chain
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/EvidenceId"
+      responses:
+        "200":
+          description: Ordered custody chain with gap detection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustodyChainResponse"
+
+    post:
+      tags: [Custody]
+      summary: "US-07 — Initiate a custody transfer"
+      description: |
+        Initiates a transfer of evidence custody from the current custodian to another
+        user. The transfer is PENDING until the receiving party accepts it.
+        - Evidence hash is re-verified at initiation; mismatch blocks the transfer.
+        - Receiving party must be an active user assigned to this case with the correct role.
+        - Once accepted, the custody record is immutable.
+      operationId: initiate_custody_transfer
+      security:
+        - BearerAuth: []
+      x-required-roles: [LabTechnician, Examiner]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/EvidenceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiateCustodyTransferRequest"
+      responses:
+        "201":
+          description: Transfer initiated — awaiting acceptance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustodyRecord"
+        "409":
+          description: Integrity check failed — transfer blocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cases/{case_id}/evidence/{evidence_id}/custody/{transfer_id}/accept:
+    post:
+      tags: [Custody]
+      summary: "US-07 — Accept a pending custody transfer"
+      description: |
+        Called by the receiving party to accept the transfer. Both parties' signatures
+        are recorded. Once accepted the record is immutable and the caller becomes the
+        new custodian. A Kafka event is published to the audit stream.
+      operationId: accept_custody_transfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/EvidenceId"
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transfer accepted — custody record finalised
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustodyRecord"
+        "403":
+          description: Only the designated receiving party can accept
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cases/{case_id}/evidence/{evidence_id}/custody/{transfer_id}/reject:
+    post:
+      tags: [Custody]
+      summary: Reject a pending custody transfer
+      operationId: reject_custody_transfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/EvidenceId"
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: Transfer rejected — evidence stays with current custodian
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustodyRecord"
+
+  # ── TASKS ───────────────────────────────────
+
+  /cases/{case_id}/tasks:
+    get:
+      tags: [Tasks]
+      summary: List all tasks for a case
+      operationId: list_tasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - name: assigned_to
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/TaskStatus"
+      responses:
+        "200":
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+
+    post:
+      tags: [Tasks]
+      summary: "US-09 — Assign an analysis task to an examiner"
+      description: |
+        Task must link to at least one evidence item. Only assigned examiner can mark
+        a task in progress or complete. Status flow: assigned → in_progress → completed → reviewed.
+      operationId: create_task
+      security:
+        - BearerAuth: []
+      x-required-roles: [CaseManager]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "201":
+          description: Task created and assigned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /cases/{case_id}/tasks/{task_id}:
+    get:
+      tags: [Tasks]
+      summary: Get a single task
+      operationId: get_task
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Task details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+
+    patch:
+      tags: [Tasks]
+      summary: Update task status or details
+      description: Only the assigned examiner may advance the status to in_progress or completed.
+      operationId: update_task
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTaskRequest"
+      responses:
+        "200":
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ── FINDINGS ────────────────────────────────
+
+  /cases/{case_id}/tasks/{task_id}/findings:
+    get:
+      tags: [Findings]
+      summary: List all findings for a task
+      operationId: list_findings
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: List of findings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Finding"
+
+    post:
+      tags: [Findings]
+      summary: "US-10 — Record a finding against a task"
+      description: |
+        Findings are linked to task_id and evidence_id. Support rich text (Markdown)
+        and file attachments. Each saved finding is timestamped and attributed to the
+        examiner who created it.
+      operationId: create_finding
+      security:
+        - BearerAuth: []
+      x-required-roles: [Examiner]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [evidence_id, title, content]
+              properties:
+                evidence_id:
+                  type: string
+                  format: uuid
+                  description: The specific evidence item this finding relates to
+                title:
+                  type: string
+                  maxLength: 200
+                content:
+                  type: string
+                  description: Markdown-formatted finding body
+                attachments:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Optional supporting files (screenshots, exports)
+      responses:
+        "201":
+          description: Finding recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Finding"
+
+  /cases/{case_id}/tasks/{task_id}/findings/{finding_id}:
+    get:
+      tags: [Findings]
+      summary: Get a single finding
+      operationId: get_finding
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/TaskId"
+        - name: finding_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Finding details with attachments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Finding"
+
+  # ── REPORTS ─────────────────────────────────
+
+  /cases/{case_id}/reports:
+    get:
+      tags: [Reports]
+      summary: List all reports for a case
+      operationId: list_reports
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      responses:
+        "200":
+          description: List of reports (summary, not full content)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReportSummary"
+
+    post:
+      tags: [Reports]
+      summary: "US-11 — Create a new forensic report"
+      description: |
+        Creates a report draft (version 1). Linked to findings and evidence automatically.
+        Content hash is computed and stored server-side on creation.
+      operationId: create_report
+      security:
+        - BearerAuth: []
+      x-required-roles: [Examiner]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReportRequest"
+      responses:
+        "201":
+          description: Report created (version 1)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+
+  /cases/{case_id}/reports/{report_id}:
+    get:
+      tags: [Reports]
+      summary: Get a report (latest version by default)
+      operationId: get_report
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+      responses:
+        "200":
+          description: Report with current version content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+
+  /cases/{case_id}/reports/{report_id}/versions:
+    get:
+      tags: [Reports]
+      summary: "US-11 — List all versions of a report"
+      operationId: list_report_versions
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+      responses:
+        "200":
+          description: All versions, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReportVersion"
+
+    post:
+      tags: [Reports]
+      summary: "US-11 — Save a new report version"
+      description: |
+        Every save creates a new immutable version row — never overwrites.
+        Version row stores: version_number, content_hash, author_id, saved_at,
+        change_summary. Deletion is not permitted.
+      operationId: save_report_version
+      security:
+        - BearerAuth: []
+      x-required-roles: [Examiner]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveReportVersionRequest"
+      responses:
+        "201":
+          description: New version created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportVersion"
+        "403":
+          description: Report is locked — create a new draft cycle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cases/{case_id}/reports/{report_id}/versions/{version_number}:
+    get:
+      tags: [Reports]
+      summary: Get a specific version of a report
+      operationId: get_report_version
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+        - name: version_number
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Specific report version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportVersion"
+
+  /cases/{case_id}/reports/{report_id}/versions/diff:
+    get:
+      tags: [Reports]
+      summary: Diff two versions of a report
+      operationId: diff_report_versions
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+        - name: from_version
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: to_version
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Unified diff between two versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportDiff"
+
+  /cases/{case_id}/reports/{report_id}/lock:
+    post:
+      tags: [Reports]
+      summary: "US-12 — Lock a report version as court-ready"
+      description: |
+        Only LegalReviewer role may apply the court-ready lock.
+        Locked version cannot be edited by anyone, including admins.
+        Lock action is written to audit log with reviewer ID and timestamp.
+        New edits create a new version under a new draft cycle.
+      operationId: lock_report
+      security:
+        - BearerAuth: []
+      x-required-roles: [LegalReviewer]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version_number, review_notes]
+              properties:
+                version_number:
+                  type: integer
+                  description: The specific version to lock
+                review_notes:
+                  type: string
+                  maxLength: 2000
+      responses:
+        "200":
+          description: Report version locked as court-ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportVersion"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /cases/{case_id}/reports/{report_id}/pdf:
+    post:
+      tags: [Reports]
+      summary: "US-14 — Generate verifiable court PDF"
+      description: |
+        Generates a PDF of the locked court-ready version. PDF includes:
+        - QR code linking to the live verification portal entry
+        - SHA-256 of the report content
+        - Full custody chain digest
+        PDF generation is logged as an audit event.
+      operationId: generate_report_pdf
+      security:
+        - BearerAuth: []
+      x-required-roles: [LegalReviewer]
+      parameters:
+        - $ref: "#/components/parameters/CaseId"
+        - $ref: "#/components/parameters/ReportId"
+      responses:
+        "200":
+          description: Generated PDF
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+          headers:
+            X-Report-Hash:
+              description: SHA-256 of the generated PDF for external verification
+              schema:
+                type: string
+        "400":
+          description: No locked version exists for this report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── VERIFY (PUBLIC, NO AUTH) ─────────────────
+
+  /verify/{hash}:
+    get:
+      tags: [Verify]
+      summary: "US-13 — Public hash verification endpoint"
+      description: |
+        Accepts a SHA-256 hash and returns integrity status and custody summary.
+        **No authentication required.**
+        - Rate limited: 10 requests/minute per IP, 100/hour per IP
+        - Unknown hashes return a `not_found` status — indistinguishable from sealed cases
+        - Response is signed with the system's RSA private key (signature in header)
+        - Sealed case hashes return `not_found` — case existence is never revealed
+      operationId: verify_hash
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-f0-9]{64}$"
+            description: SHA-256 hex string (64 lowercase hex characters)
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationResult"
+          headers:
+            X-Signature:
+              description: RSA-SHA256 signature of the response body (base64)
+              schema:
+                type: string
+            X-Signature-Key-Id:
+              description: Key ID of the signing key — use to fetch public key for verification
+              schema:
+                type: string
+        "400":
+          description: Invalid hash format (must be 64 hex chars)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /verify/public-key:
+    get:
+      tags: [Verify]
+      summary: Get the system's public key for verifying response signatures
+      operationId: get_verification_public_key
+      responses:
+        "200":
+          description: RSA public key in JWK format
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kty:
+                    type: string
+                    example: RSA
+                  use:
+                    type: string
+                    example: sig
+                  n:
+                    type: string
+                  e:
+                    type: string
+
+  # ── USERS ───────────────────────────────────
+
+  /users:
+    get:
+      tags: [Users]
+      summary: "US-16 — List all users"
+      operationId: list_users
+      security:
+        - BearerAuth: []
+      x-required-roles: [Admin]
+      parameters:
+        - name: role
+          in: query
+          schema:
+            $ref: "#/components/schemas/UserRole"
+        - name: is_active
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserProfile"
+
+    post:
+      tags: [Users]
+      summary: "US-16 — Create a new user"
+      operationId: create_user
+      security:
+        - BearerAuth: []
+      x-required-roles: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+
+  /users/{user_id}:
+    get:
+      tags: [Users]
+      summary: Get a single user
+      operationId: get_user
+      security:
+        - BearerAuth: []
+      x-required-roles: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+
+    patch:
+      tags: [Users]
+      summary: "US-16 — Update user role or status"
+      description: |
+        Role changes are logged with before/after values and the admin's ID.
+        A user cannot be both Examiner and LegalReviewer on the same case.
+        Deactivating a user preserves all their history — audit records remain intact.
+      operationId: update_user
+      security:
+        - BearerAuth: []
+      x-required-roles: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "409":
+          description: Role conflict detected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── AUDIT ───────────────────────────────────
+
+  /audit:
+    get:
+      tags: [Audit]
+      summary: "US-15 — Query the immutable audit log"
+      description: |
+        Returns audit log entries. Log rows cannot be edited, deleted, or truncated.
+        Supports filtering by actor, action type, resource, and time range.
+      operationId: query_audit_log
+      security:
+        - BearerAuth: []
+      x-required-roles: [Admin]
+      parameters:
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: action_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/AuditActionType"
+        - name: resource_id
+          in: query
+          schema:
+            type: string
+        - name: from_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Paginated audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogResponse"
+
+  /audit/export:
+    get:
+      tags: [Audit]
+      summary: Export audit log as CSV
+      operationId: export_audit_log
+      security:
+        - BearerAuth: []
+      x-required-roles: [Admin]
+      parameters:
+        - name: from_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: CSV export of audit log
+          content:
+            text/csv:
+              schema:
+                type: string
+
+# ─────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ── PARAMETERS ──────────────────────────────
+
+  parameters:
+    CaseId:
+      name: case_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Unique case identifier
+
+    EvidenceId:
+      name: evidence_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Unique evidence item identifier
+
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    ReportId:
+      name: report_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  # ── RESPONSES ───────────────────────────────
+
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Forbidden:
+      description: Authenticated but insufficient role or case-level access
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until rate limit resets
+
+  # ── SCHEMAS ─────────────────────────────────
+
+  schemas:
+
+    # ─ Enums ─
+
+    UserRole:
+      type: string
+      enum: [CaseManager, LabTechnician, Examiner, LegalReviewer, Admin, PublicVerifier]
+
+    CaseStatus:
+      type: string
+      enum: [open, active, closed, archived]
+      description: Valid transitions — open→active→closed→archived only
+
+    EvidenceType:
+      type: string
+      enum: [disk_image, file, memory_dump, log_file, network_capture, mobile_backup, other]
+
+    IntegrityStatus:
+      type: string
+      enum: [verified, tampered, pending, unknown]
+
+    TaskStatus:
+      type: string
+      enum: [assigned, in_progress, completed, reviewed]
+
+    CustodyTransferStatus:
+      type: string
+      enum: [pending, accepted, rejected]
+
+    ReportStatus:
+      type: string
+      enum: [draft, under_review, court_ready]
+
+    AuditActionType:
+      type: string
+      enum:
+        - case.created
+        - case.updated
+        - case.status_changed
+        - user.assigned_to_case
+        - user.removed_from_case
+        - evidence.uploaded
+        - evidence.accessed
+        - evidence.downloaded
+        - evidence.tamper_detected
+        - hash.imported
+        - custody.transfer_initiated
+        - custody.transfer_accepted
+        - custody.transfer_rejected
+        - task.created
+        - task.status_changed
+        - finding.created
+        - report.created
+        - report.version_saved
+        - report.locked
+        - report.pdf_generated
+        - user.created
+        - user.role_changed
+        - user.deactivated
+        - verify.hash_queried
+
+    # ─ Auth ─
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: Short-lived JWT (15 minutes)
+        refresh_token:
+          type: string
+          description: Long-lived refresh token (7 days)
+        token_type:
+          type: string
+          default: bearer
+        expires_in:
+          type: integer
+          description: Access token TTL in seconds
+          example: 900
+
+    # ─ Users ─
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+        role:
+          $ref: "#/components/schemas/UserRole"
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateUserRequest:
+      type: object
+      required: [email, full_name, role, password]
+      properties:
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+          maxLength: 200
+        role:
+          $ref: "#/components/schemas/UserRole"
+        password:
+          type: string
+          format: password
+          minLength: 12
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        role:
+          $ref: "#/components/schemas/UserRole"
+        is_active:
+          type: boolean
+        full_name:
+          type: string
+
+    # ─ Cases ─
+
+    Case:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: System-generated UUID
+        case_number:
+          type: string
+          example: CASE-2024-00142
+          description: Human-readable sequential identifier
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: "#/components/schemas/CaseStatus"
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        evidence_count:
+          type: integer
+        assignment_count:
+          type: integer
+
+    CaseListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Case"
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+
+    CreateCaseRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          maxLength: 300
+        description:
+          type: string
+          maxLength: 2000
+        reference_number:
+          type: string
+          description: Optional external reference (e.g. police incident number)
+          maxLength: 100
+
+    UpdateCaseRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 300
+        description:
+          type: string
+          maxLength: 2000
+        status:
+          $ref: "#/components/schemas/CaseStatus"
+        status_reason:
+          type: string
+          maxLength: 500
+          description: Required when changing status
+
+    CaseAssignment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        case_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        user:
+          $ref: "#/components/schemas/UserProfile"
+        assigned_by:
+          type: string
+          format: uuid
+        assigned_at:
+          type: string
+          format: date-time
+
+    AssignUserRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+
+    # ─ Evidence ─
+
+    Evidence:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        case_id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        file_size_bytes:
+          type: integer
+          format: int64
+        mime_type:
+          type: string
+        evidence_type:
+          $ref: "#/components/schemas/EvidenceType"
+        sha256_hash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: SHA-256 computed server-side at time of upload
+        hash_source:
+          type: string
+          enum: [computed, imported]
+          description: Whether hash was computed on upload or imported from external tool
+        acquisition_tool:
+          type: string
+          nullable: true
+          description: Name of external tool if hash_source is imported
+        description:
+          type: string
+        acquisition_notes:
+          type: string
+          nullable: true
+        uploaded_by:
+          type: string
+          format: uuid
+        uploaded_at:
+          type: string
+          format: date-time
+        current_custodian_id:
+          type: string
+          format: uuid
+          nullable: true
+        integrity_status:
+          $ref: "#/components/schemas/IntegrityStatus"
+
+    EvidenceWithIntegrity:
+      allOf:
+        - $ref: "#/components/schemas/Evidence"
+        - type: object
+          properties:
+            integrity_check:
+              type: object
+              properties:
+                checked_at:
+                  type: string
+                  format: date-time
+                stored_hash:
+                  type: string
+                recomputed_hash:
+                  type: string
+                match:
+                  type: boolean
+                alert_raised:
+                  type: boolean
+
+    HashImportResult:
+      type: object
+      properties:
+        total_rows:
+          type: integer
+        imported:
+          type: integer
+        skipped:
+          type: integer
+        errors:
+          type: integer
+        duplicates:
+          type: integer
+        row_results:
+          type: array
+          items:
+            type: object
+            properties:
+              row:
+                type: integer
+              filename:
+                type: string
+              status:
+                type: string
+                enum: [imported, duplicate, error, skipped]
+              message:
+                type: string
+                nullable: true
+
+    # ─ Custody ─
+
+    CustodyRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        evidence_id:
+          type: string
+          format: uuid
+        from_user_id:
+          type: string
+          format: uuid
+        to_user_id:
+          type: string
+          format: uuid
+        from_user:
+          $ref: "#/components/schemas/UserProfile"
+        to_user:
+          $ref: "#/components/schemas/UserProfile"
+        transfer_reason:
+          type: string
+        hash_at_transfer:
+          type: string
+          description: SHA-256 of evidence at moment of transfer — proves no tampering at handoff
+        status:
+          $ref: "#/components/schemas/CustodyTransferStatus"
+        initiated_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+          nullable: true
+        from_signature:
+          type: string
+          description: Digital signature from transferring party
+        to_signature:
+          type: string
+          nullable: true
+          description: Digital signature from receiving party (set on acceptance)
+
+    CustodyChainResponse:
+      type: object
+      properties:
+        evidence_id:
+          type: string
+          format: uuid
+        chain_complete:
+          type: boolean
+          description: False if any gaps in custody are detected
+        gaps:
+          type: array
+          description: Time periods where no custodian is recorded
+          items:
+            type: object
+            properties:
+              from_ts:
+                type: string
+                format: date-time
+              to_ts:
+                type: string
+                format: date-time
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/CustodyRecord"
+
+    InitiateCustodyTransferRequest:
+      type: object
+      required: [to_user_id, transfer_reason]
+      properties:
+        to_user_id:
+          type: string
+          format: uuid
+        transfer_reason:
+          type: string
+          maxLength: 1000
+
+    # ─ Tasks ─
+
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        case_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        assigned_to:
+          $ref: "#/components/schemas/UserProfile"
+        assigned_by:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        evidence_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Evidence items this task relates to
+        due_date:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateTaskRequest:
+      type: object
+      required: [title, assigned_to_user_id, evidence_ids]
+      properties:
+        title:
+          type: string
+          maxLength: 300
+        description:
+          type: string
+          maxLength: 2000
+        assigned_to_user_id:
+          type: string
+          format: uuid
+        evidence_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        due_date:
+          type: string
+          format: date-time
+          nullable: true
+
+    UpdateTaskRequest:
+      type: object
+      properties:
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        title:
+          type: string
+        description:
+          type: string
+        due_date:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ─ Findings ─
+
+    Finding:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        evidence_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        content:
+          type: string
+          description: Markdown-formatted content
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              filename:
+                type: string
+              sha256_hash:
+                type: string
+              size_bytes:
+                type: integer
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    # ─ Reports ─
+
+    ReportSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        case_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/ReportStatus"
+        latest_version:
+          type: integer
+        court_ready_version:
+          type: integer
+          nullable: true
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Report:
+      allOf:
+        - $ref: "#/components/schemas/ReportSummary"
+        - type: object
+          properties:
+            current_version_content:
+              type: string
+              description: Markdown content of the latest version
+            linked_evidence_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+            linked_finding_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+
+    ReportVersion:
+      type: object
+      properties:
+        report_id:
+          type: string
+          format: uuid
+        version_number:
+          type: integer
+        content:
+          type: string
+          description: Full Markdown content of this version
+        content_hash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: SHA-256 of the content — computed server-side on save
+        author_id:
+          type: string
+          format: uuid
+        author:
+          $ref: "#/components/schemas/UserProfile"
+        saved_at:
+          type: string
+          format: date-time
+        change_summary:
+          type: string
+        is_court_ready:
+          type: boolean
+        locked_by:
+          type: string
+          format: uuid
+          nullable: true
+        locked_at:
+          type: string
+          format: date-time
+          nullable: true
+        review_notes:
+          type: string
+          nullable: true
+
+    SaveReportVersionRequest:
+      type: object
+      required: [content, change_summary]
+      properties:
+        content:
+          type: string
+          description: Full Markdown content of the new version
+        change_summary:
+          type: string
+          maxLength: 500
+          description: Brief description of what changed in this version
+
+    CreateReportRequest:
+      type: object
+      required: [title, content]
+      properties:
+        title:
+          type: string
+          maxLength: 300
+        content:
+          type: string
+          description: Markdown content for version 1
+
+    ReportDiff:
+      type: object
+      properties:
+        report_id:
+          type: string
+          format: uuid
+        from_version:
+          type: integer
+        to_version:
+          type: integer
+        unified_diff:
+          type: string
+          description: Standard unified diff format string
+
+    # ─ Verify ─
+
+    VerificationResult:
+      type: object
+      properties:
+        hash:
+          type: string
+        status:
+          type: string
+          enum: [verified, tampered, not_found]
+          description: |
+            - verified: hash exists, file integrity confirmed
+            - tampered: hash exists but stored file no longer matches
+            - not_found: hash not in system (or case is sealed — indistinguishable)
+        first_registered_at:
+          type: string
+          format: date-time
+          nullable: true
+        custody_transfer_count:
+          type: integer
+          nullable: true
+        case_number:
+          type: string
+          nullable: true
+          description: Redacted or null if sealed
+        report_versions_count:
+          type: integer
+          nullable: true
+        verified_at:
+          type: string
+          format: date-time
+          description: Server timestamp of this verification check
+
+    # ─ Audit ─
+
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for unauthenticated actions (e.g. public verify)
+        actor_role:
+          $ref: "#/components/schemas/UserRole"
+        action_type:
+          $ref: "#/components/schemas/AuditActionType"
+        resource_type:
+          type: string
+          example: evidence
+        resource_id:
+          type: string
+          description: UUID of the affected resource
+        ip_address:
+          type: string
+        result:
+          type: string
+          enum: [success, failure, blocked]
+        detail:
+          type: object
+          description: Action-specific metadata (e.g. old/new status, hash values)
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+
+    AuditLogResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+
+    # ─ Errors ─
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code
+          example: invalid_status_transition
+        message:
+          type: string
+          description: Human-readable description
+          example: Cannot transition from open to archived directly
+        detail:
+          type: object
+          additionalProperties: true
+          description: Optional additional context
