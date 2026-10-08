@@ -7,14 +7,29 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional, TypeAlias
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, StringConstraints, field_validator
 import re
 
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
+
+
+# ── Required free-text fields ────────────────────────────────────────────────
+# Trim surrounding whitespace, then require at least one character, so that
+# "" and "   " are both rejected (a blank custody reason or review note would
+# defeat the purpose of recording one).
+def _required_text(max_len: int):
+    return Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=max_len)]
+
+Text200: TypeAlias  = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+Text300: TypeAlias  = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
+Text500: TypeAlias  = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+Text1000: TypeAlias = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+Text2000: TypeAlias = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+
 
 class UserRole(str, Enum):
     case_manager    = "CaseManager"
@@ -141,7 +156,7 @@ class UserProfile(BaseModel):
 
 class CreateUserRequest(BaseModel):
     email:     EmailStr
-    full_name: str = Field(max_length=200)
+    full_name: Text200
     role:      UserRole
     password:  str = Field(min_length=12)
 
@@ -155,7 +170,7 @@ class UpdateUserRequest(BaseModel):
 # ── Cases ─────────────────────────────────────────────────────────────────────
 
 class CreateCaseRequest(BaseModel):
-    title:            str = Field(max_length=300)
+    title:            Text300
     description:      Optional[str] = Field(default=None, max_length=2000)
     reference_number: Optional[str] = Field(default=None, max_length=100)
 
@@ -258,7 +273,7 @@ class HashImportResult(BaseModel):
 
 class InitiateCustodyTransferRequest(BaseModel):
     to_user_id:      UUID
-    transfer_reason: str = Field(max_length=1000)
+    transfer_reason: Text1000
 
 
 class CustodyRecord(BaseModel):
@@ -294,7 +309,7 @@ class CustodyChainResponse(BaseModel):
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
 class CreateTaskRequest(BaseModel):
-    title:                 str = Field(max_length=300)
+    title:                 Text300
     description:           Optional[str] = Field(default=None, max_length=2000)
     assigned_to_user_id:   UUID
     evidence_ids:          list[UUID] = Field(min_length=1)
@@ -349,13 +364,13 @@ class FindingResponse(BaseModel):
 # ── Reports ───────────────────────────────────────────────────────────────────
 
 class CreateReportRequest(BaseModel):
-    title:   str = Field(max_length=300)
+    title:   Text300
     content: str   # Markdown for version 1
 
 
 class SaveReportVersionRequest(BaseModel):
     content:        str
-    change_summary: str = Field(max_length=500)
+    change_summary: Text500
 
 
 class ReportVersionResponse(BaseModel):
@@ -404,7 +419,7 @@ class ReportDiff(BaseModel):
 
 class LockReportRequest(BaseModel):
     version_number: int
-    review_notes:   str = Field(max_length=2000)
+    review_notes:   Text2000
 
 
 # ── Verify ────────────────────────────────────────────────────────────────────

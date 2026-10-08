@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
+from core.ratelimit import verify_rate_limit
 from core.security import CurrentUser, UserRole, get_current_user, require_roles
 from schemas import (
     AuditActionType, AuditEntry, AuditLogResponse,
@@ -292,7 +293,6 @@ async def generate_pdf(case_id: UUID, report_id: UUID,
 
     c.save()
     pdf_bytes = buffer.getvalue()
-    pdf_hash  = auth_service.hash_password.__module__  # reuse hashlib
     from core.security import compute_sha256
     pdf_hash = compute_sha256(pdf_bytes)
 
@@ -319,7 +319,8 @@ async def generate_pdf(case_id: UUID, report_id: UUID,
 router_verify = APIRouter()
 
 @router_verify.get("/{hash}", response_model=VerificationResult,
-                   summary="US-13 — Public hash verification")
+                   dependencies=[Depends(verify_rate_limit)],
+                   summary="US-13 — Public hash verification (rate limited, MC-07)")
 async def verify_route(hash: str, req: Request, db: AsyncSession = Depends(get_db)):
     import re
     if not re.match(r"^[a-f0-9]{64}$", hash):

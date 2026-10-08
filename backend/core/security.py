@@ -14,10 +14,13 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
+from jose.exceptions import JOSEError
 
 from core.config import settings
 
-bearer_scheme = HTTPBearer()
+# auto_error=False so a missing Authorization header reaches get_current_user,
+# which returns the semantically correct 401 (FastAPI's default is 403).
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class UserRole(str, Enum):
@@ -45,7 +48,11 @@ def decode_token(token: str) -> dict:
             options={"verify_aud": False},
         )
         return payload
-    except JWTError as e:
+    # JOSEError is the base class for every python-jose failure — an expired
+    # or badly-signed token (JWTError), a malformed/undecodable key (JWKError),
+    # or anything else the library rejects. Any of these means "this token
+    # cannot be trusted" and must return 401, never a 500 with a stack trace.
+    except JOSEError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired token: {e}",
@@ -54,8 +61,14 @@ def decode_token(token: str) -> dict:
 
 
 def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
 ) -> CurrentUser:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     payload = decode_token(credentials.credentials)
     return CurrentUser(
         user_id=UUID(payload["sub"]),

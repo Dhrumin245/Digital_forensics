@@ -16,6 +16,7 @@ cryptography==43.0.1              # RSA signing for verify portal
 # ── Config ────────────────────────────────────────────────────────────────────
 pydantic==2.9.2
 pydantic-settings==2.5.2
+email-validator==2.2.0          # required for Pydantic's EmailStr (used in schemas.py)
 
 # ── Kafka ─────────────────────────────────────────────────────────────────────
 aiokafka==0.11.0
@@ -32,6 +33,7 @@ reportlab==4.2.2
 qrcode[pil]==8.0
 
 # ── Observability ─────────────────────────────────────────────────────────────
+setuptools==74.1.2
 opentelemetry-api==1.27.0
 opentelemetry-sdk==1.27.0
 opentelemetry-instrumentation-fastapi==0.48b0
