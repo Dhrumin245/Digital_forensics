@@ -59,7 +59,7 @@ async def log(
             VALUES
                 (:id, :actor_id, :actor_role, :action_type,
                  :resource_type, :resource_id, :ip_address,
-                 :result, :detail::jsonb, :timestamp)
+                 :result, CAST(:detail AS jsonb), :timestamp)
         """),
         {
             "id":            str(uuid.uuid4()),

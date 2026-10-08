@@ -17,6 +17,8 @@ depends_on = None
 
 def upgrade() -> None:
 
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+
     # ── Audit schema (must exist before the table) ────────────────────────────
     op.execute("CREATE SCHEMA IF NOT EXISTS forensics_audit")
 
@@ -356,10 +358,10 @@ def upgrade() -> None:
         INSERT INTO users (id, email, full_name, role, password_hash, is_active, created_at)
         VALUES (
             gen_random_uuid(),
-            'admin@forensics.local',
+            'admin@forensicchain.dev',
             'System Administrator',
             'Admin',
-            '$2b$12$CHANGEME_run_python_hash_password_to_generate',
+            crypt('Admin@Forensics123', gen_salt('bf', 12)),
             TRUE,
             NOW()
         ) ON CONFLICT (email) DO NOTHING;

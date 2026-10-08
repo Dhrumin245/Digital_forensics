@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.audit import log
@@ -35,7 +35,7 @@ async def create_case(body: CreateCaseRequest, req: Request,
 
 @router.get("", response_model=CaseListResponse)
 async def list_cases(req: Request, current_user: AuthUser,
-                     status_filter: CaseStatus | None = None,
+                     status_filter: CaseStatus | None = Query(default=None, alias="status"),
                      page: int = 1, page_size: int = 20,
                      db: AsyncSession = Depends(get_db)):
     return await case_service.list_cases(

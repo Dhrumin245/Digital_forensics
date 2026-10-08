@@ -46,24 +46,25 @@ forensics-api/
 
 ## Modules and user stories
 
-| Module | User stories | Endpoint prefix |
-|---|---|---|
-| Auth | Login, token refresh | `/api/v1/auth` |
-| Cases | US-01 Create, US-02 Assign, US-03 Status transitions | `/api/v1/cases` |
-| Evidence | US-04 Upload + hash, US-05 Import from Autopsy/FTK, US-06 Integrity check | `/api/v1/cases/{id}/evidence` |
-| Custody | US-07 Transfer, US-08 Chain of custody view | `/api/v1/cases/{id}/evidence/{id}/custody` |
-| Tasks | US-09 Assign examiner tasks | `/api/v1/cases/{id}/tasks` |
-| Findings | US-10 Record findings with attachments | `/api/v1/cases/{id}/tasks/{id}/findings` |
-| Reports | US-11 Versioned reports, US-12 Court lock, US-14 PDF | `/api/v1/cases/{id}/reports` |
-| Verify | US-13 Public hash verification (no auth) | `/api/v1/verify/{hash}` |
-| Users | US-16 User management | `/api/v1/users` |
-| Audit | US-15 Immutable audit log | `/api/v1/audit` |
+| Module   | User stories                                                              | Endpoint prefix                            |
+| -------- | ------------------------------------------------------------------------- | ------------------------------------------ |
+| Auth     | Login, token refresh                                                      | `/api/v1/auth`                             |
+| Cases    | US-01 Create, US-02 Assign, US-03 Status transitions                      | `/api/v1/cases`                            |
+| Evidence | US-04 Upload + hash, US-05 Import from Autopsy/FTK, US-06 Integrity check | `/api/v1/cases/{id}/evidence`              |
+| Custody  | US-07 Transfer, US-08 Chain of custody view                               | `/api/v1/cases/{id}/evidence/{id}/custody` |
+| Tasks    | US-09 Assign examiner tasks                                               | `/api/v1/cases/{id}/tasks`                 |
+| Findings | US-10 Record findings with attachments                                    | `/api/v1/cases/{id}/tasks/{id}/findings`   |
+| Reports  | US-11 Versioned reports, US-12 Court lock, US-14 PDF                      | `/api/v1/cases/{id}/reports`               |
+| Verify   | US-13 Public hash verification (no auth)                                  | `/api/v1/verify/{hash}`                    |
+| Users    | US-16 User management                                                     | `/api/v1/users`                            |
+| Audit    | US-15 Immutable audit log                                                 | `/api/v1/audit`                            |
 
 ---
 
 ## Quickstart
 
 ### Prerequisites
+
 - Docker and Docker Compose
 - Python 3.12+ (for local dev without Docker)
 - OpenSSL (for JWT key generation)
@@ -84,6 +85,7 @@ cp .env.example .env
 ```
 
 `.env.example`:
+
 ```
 JWT_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
 JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
@@ -102,6 +104,7 @@ docker compose up -d
 ```
 
 This starts:
+
 - **API** at http://localhost:8000
 - **Swagger UI** at http://localhost:8000/api/v1/docs
 - **PostgreSQL** at localhost:5432
@@ -120,6 +123,19 @@ docker compose exec api alembic upgrade head
 # Locally
 alembic upgrade head
 ```
+
+### Local development login
+
+The migration seeds a development administrator account:
+
+```text
+Email:    admin@forensicchain.dev
+Password: Admin@Forensics123
+```
+
+After changing or pulling the seed migration, run `alembic upgrade head` again
+so an existing database is repaired by the admin-password migration. Change
+this password before using the system outside local development.
 
 ### 5. Run the test suite
 
@@ -149,6 +165,7 @@ locust -f tests/locustfile.py --host=http://localhost:8000
 ## Key architectural decisions
 
 ### Cryptographic immutability
+
 - SHA-256 computed **server-side** on every upload — client hashes are never trusted
 - Hash re-verified on **every access and download** — not just at intake
 - Custody records are immutable once accepted — DB trigger prevents UPDATE
@@ -156,6 +173,7 @@ locust -f tests/locustfile.py --host=http://localhost:8000
 - Audit log in separate schema — app DB user has INSERT + SELECT only, no UPDATE/DELETE
 
 ### Distributed architecture (Phase 5)
+
 - **Kafka** publishes events for every custody transfer and tamper alert
   — decouples audit trail from the API request lifecycle
 - **Kafka consumer** mirrors every audit event to S3 (Object Lock) in real time
@@ -164,13 +182,16 @@ locust -f tests/locustfile.py --host=http://localhost:8000
 - **Prometheus + Grafana** expose API latency, error rate, evidence upload count
 
 ### Role-based access control
+
 All roles are enforced at two levels:
+
 1. **Route level** — `require_roles()` dependency rejects wrong roles with HTTP 403
 2. **Case level** — even a correctly-roled user cannot access a case they are not assigned to
 
 Roles: `CaseManager | LabTechnician | Examiner | LegalReviewer | Admin | PublicVerifier`
 
 ### Public verification portal (US-13)
+
 - No authentication required — designed for lawyers and judges
 - Rate limited: 10 req/min per IP, 100 req/hour per IP (Redis)
 - Sealed cases and unknown hashes return identical `not_found` responses
@@ -181,14 +202,14 @@ Roles: `CaseManager | LabTechnician | Examiner | LegalReviewer | Admin | PublicV
 
 ## Evaluation metrics (D8)
 
-| Metric | Target | How to measure |
-|---|---|---|
-| Custody completeness | 100% | Run `GET /cases/{id}/evidence/{id}/custody` — check `chain_complete` |
-| Tamper detection rate | 100% | Inject 10 modified files, verify all flagged |
-| Authorization enforcement | 0 breaches | Run 20 unauthorized API calls, all must return 403 |
-| Report traceability | 100% | Every report version has author, timestamp, hash |
-| API latency (p95) | < 200ms | Prometheus histogram — `http_request_duration_seconds` |
-| Usability | > 80% task completion | Ask 3 users to register evidence and verify a hash |
+| Metric                    | Target                | How to measure                                                       |
+| ------------------------- | --------------------- | -------------------------------------------------------------------- |
+| Custody completeness      | 100%                  | Run `GET /cases/{id}/evidence/{id}/custody` — check `chain_complete` |
+| Tamper detection rate     | 100%                  | Inject 10 modified files, verify all flagged                         |
+| Authorization enforcement | 0 breaches            | Run 20 unauthorized API calls, all must return 403                   |
+| Report traceability       | 100%                  | Every report version has author, timestamp, hash                     |
+| API latency (p95)         | < 200ms               | Prometheus histogram — `http_request_duration_seconds`               |
+| Usability                 | > 80% task completion | Ask 3 users to register evidence and verify a hash                   |
 
 ---
 
@@ -209,13 +230,13 @@ alembic downgrade -1
 
 ## Observability endpoints
 
-| Endpoint | What it shows |
-|---|---|
-| `GET /health` | API liveness |
-| `GET /metrics` | Prometheus metrics |
-| Jaeger UI :16686 | Request traces |
-| Grafana :3001 | Dashboards |
-| Kafka topics | `forensics.custody`, `forensics.audit`, `forensics.alerts` |
+| Endpoint         | What it shows                                              |
+| ---------------- | ---------------------------------------------------------- |
+| `GET /health`    | API liveness                                               |
+| `GET /metrics`   | Prometheus metrics                                         |
+| Jaeger UI :16686 | Request traces                                             |
+| Grafana :3001    | Dashboards                                                 |
+| Kafka topics     | `forensics.custody`, `forensics.audit`, `forensics.alerts` |
 
 ---
 
