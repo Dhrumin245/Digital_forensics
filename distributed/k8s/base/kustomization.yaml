@@ -7,7 +7,9 @@ resources:
   - namespace-config.yaml
   - postgres.yaml
   - kafka-redis-minio.yaml
+  - audit-mirror-consumer.yaml
   - api-deployment.yaml
+  - frontend-deployment.yaml
   - ingress-network.yaml
 
 commonLabels:

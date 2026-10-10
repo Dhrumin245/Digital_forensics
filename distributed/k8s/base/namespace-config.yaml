@@ -20,6 +20,7 @@ data:
   KAFKA_TOPIC_CUSTODY: "forensics.custody"
   KAFKA_TOPIC_AUDIT: "forensics.audit"
   KAFKA_TOPIC_ALERTS: "forensics.alerts"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "jaeger-service:4317"
   S3_ENDPOINT: "http://minio-service:9000"
   S3_BUCKET_EVIDENCE: "forensics-evidence"
   S3_BUCKET_AUDIT_MIRROR: "forensics-audit-mirror"

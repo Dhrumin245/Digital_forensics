@@ -29,7 +29,9 @@ from routers.remaining_routers import (
 def _setup_tracing() -> None:
     provider = TracerProvider()
     provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint="http://jaeger:4317"))
+        BatchSpanProcessor(
+            OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT)
+        )
     )
     trace.set_tracer_provider(provider)
 

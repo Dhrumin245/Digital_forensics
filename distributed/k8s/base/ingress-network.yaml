@@ -48,6 +48,15 @@ spec:
                 name: forensics-api-service
                 port:
                   number: 80
+          # React single-page application.  Its relative /api/v1 requests use
+          # the API paths above, so no browser-only endpoint is required.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: forensicchain-frontend-service
+                port:
+                  number: 80
 
 ---
 # ══════════════════════════════════════════════════════════════════
@@ -151,6 +160,9 @@ spec:
         - podSelector:
             matchLabels:
               app: forensics-api
+        - podSelector:
+            matchLabels:
+              app: audit-mirror-consumer
       ports:
         - port: 9092
 

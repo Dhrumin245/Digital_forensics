@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     KAFKA_TOPIC_AUDIT:       str = "forensics.audit"
     KAFKA_TOPIC_ALERTS:      str = "forensics.alerts"
 
+    # OpenTelemetry collector / Jaeger OTLP gRPC endpoint.  Keep this
+    # environment-configurable: Docker and Kubernetes use different service DNS
+    # names.
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = "localhost:4317"
+
     # ── Object storage (MinIO / S3) ───────────────────────────────────────────
     S3_ENDPOINT:          str = "http://localhost:9000"
     S3_ACCESS_KEY:        str = "minioadmin"

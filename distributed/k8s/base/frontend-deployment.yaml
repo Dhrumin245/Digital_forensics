@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forensicchain-frontend
+  namespace: forensics
+  labels:
+    app: forensicchain-frontend
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: forensicchain-frontend
+  template:
+    metadata:
+      labels:
+        app: forensicchain-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/YOUR_ORG/forensicchain-frontend:latest
+          env:
+            - name: API_UPSTREAM
+              value: forensics-api-service:80
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forensicchain-frontend-service
+  namespace: forensics
+spec:
+  selector:
+    app: forensicchain-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

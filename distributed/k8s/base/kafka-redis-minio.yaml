@@ -321,11 +321,22 @@ spec:
       containers:
         - name: mc
           image: minio/mc:latest
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: forensics-secrets
+                  key: S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: forensics-secrets
+                  key: S3_SECRET_KEY
           command:
             - sh
             - -c
             - |
-              mc alias set local http://minio-service:9000 minioadmin minioadmin
+              mc alias set local http://minio-service:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
               mc mb --ignore-existing local/forensics-evidence
               mc mb --ignore-existing local/forensics-audit-mirror
               mc anonymous set none local/forensics-evidence

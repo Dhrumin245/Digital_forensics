@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
@@ -21,7 +21,11 @@ WORKDIR /app
 RUN addgroup --system forensics && adduser --system --ingroup forensics forensics
 
 COPY --from=builder /install /usr/local
-COPY . .
+COPY backend/ /app/
+# The audit mirror is a separately deployed process but deliberately shares the
+# pinned API dependencies and image.  Keeping its source in the image prevents
+# the Kubernetes consumer from failing with a missing-script error.
+COPY distributed/kafka/ /app/kafka/
 
 # Fix ownership
 RUN chown -R forensics:forensics /app
@@ -32,4 +36,4 @@ EXPOSE 8000
 
 # Dev: hot-reload with --reload
 # Prod: remove --reload, set workers > 1
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
